@@ -1,0 +1,13 @@
+[Unit]
+Description=esto service
+
+[Service]
+Type=simple
+Environment=ESTO_JOURNAL_LOGGING=true RUST_LOG=debug ESTO_CONFIG_PATH=/home/pi/esto.toml
+ExecStart=/home/pi/esto
+
+StandardOutput=journal
+StandardError=journal
+
+[Install]
+WantedBy=default.target

@@ -1,0 +1,6 @@
+dbfile = "sqlite::memory:"
+
+[[commands]]
+command = 'tail -f /var/log/auth.log'
+# command = 'tail -f foo'
+contains = ['Failed password for root']
