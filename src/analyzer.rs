@@ -56,7 +56,11 @@ impl Analyser {
                                     "Command '{command}' exited with status: {status}",
                                     command = &self.command
                                 );
-                                break Ok(())
+                                if status.success() {
+                                    break Ok(())
+                                } else {
+                                    break Err(EstoError::AnalyzeCommand(status.code()));
+                                }
                             }
                             Err(error) => break Err(EstoError::AnalyzerHandleAwait(error))
                         }

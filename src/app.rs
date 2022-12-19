@@ -2,7 +2,8 @@ use std::path::PathBuf;
 use std::sync::Arc;
 use std::{env, io};
 
-use futures::future;
+use async_recursion::async_recursion;
+use futures::{future, Future};
 use serde::{Deserialize, Serialize};
 use tokio::signal::unix::{self, SignalKind};
 use tokio::sync::{broadcast, mpsc, oneshot, Mutex};
@@ -64,6 +65,9 @@ pub enum EstoError {
 
     #[error("Sqlx: {0}")]
     Sqlx(#[from] sqlx::Error),
+
+    #[error("Anlyze command error exit with code: {0:?}")]
+    AnalyzeCommand(Option<i32>),
 }
 
 pub async fn run() -> Result<(), EstoError> {
@@ -112,8 +116,32 @@ pub async fn run() -> Result<(), EstoError> {
             .map(Analyser::from)
             .map(|analyzer| {
                 let blocker = tx.clone();
-                let shutdown_receiver = btx.subscribe();
-                tokio::spawn(async move { analyzer.run(blocker, shutdown_receiver).await })
+                let btx = btx.clone();
+                tokio::spawn(async move {
+                    #[async_recursion]
+                    async fn run(
+                        analyzer: Analyser,
+                        blocker: mpsc::Sender<String>,
+                        shutdown_sender: broadcast::Sender<()>,
+                        mut max_attemts: i8,
+                    ) -> Box<impl Future<Output = Result<(), EstoError>>> {
+                        let result = analyzer
+                            .run(blocker.clone(), shutdown_sender.subscribe())
+                            .await;
+                        max_attemts -= 1;
+
+                        let get_result = |result| Box::new(async { result });
+                        log::debug!("max attempts: {max_attemts}");
+                        match result {
+                            Err(_) if max_attemts > 0 => {
+                                run(analyzer, blocker, shutdown_sender, max_attemts).await
+                            }
+                            _ => get_result(result),
+                        }
+                    }
+
+                    run(analyzer, blocker, btx, 5).await
+                })
             })
             .collect::<Vec<_>>(),
     );

@@ -109,7 +109,7 @@ where
             tokio::select! {
                 Some(addr) = ip_receiver.recv() => {
                     log::debug!("received ip: {addr}");
-                    if self.should_block_ip(addr.clone()).await {
+                    if self.should_block_ip(addr.clone()).await && !self.is_blocked(&addr).await {
                         log::info!("Blocking ip: {addr}");
                         let ip = Ip { ip: addr, blocked: Instant::now() };
                         ip.block::<C>().await?;
@@ -207,6 +207,11 @@ where
             candidates,
             storage.candidates.len()
         )
+    }
+
+    async fn is_blocked(&self, addr: &str) -> bool {
+        let storage = self.storage.lock().await;
+        storage.ips.iter().any(|ip| ip.ip == addr)
     }
 }
 
