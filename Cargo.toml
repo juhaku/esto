@@ -1,13 +1,13 @@
 [package]
 name = "esto"
-version = "0.1.0"
+version = "0.2.0"
 edition = "2021"
 
 # See more keys and their definitions at https://doc.rust-lang.org/cargo/reference/manifest.html
 
 [dependencies]
 serde = { version = "1.0", features = ["derive"] }
-toml = "0.5"
+toml = "0.7"
 tokio = { version = "1", features = ["full", "test-util"] }
 tokio-stream = "0.1"
 futures = "0.3"
@@ -18,6 +18,6 @@ env_logger = "0.10"
 async-trait = "0.1"
 sqlx = { version = "0.6", features = ["runtime-tokio-rustls", "sqlite"] }
 time = "0.3"
-systemd-journal-logger = "0.6"
+systemd-journal-logger = "0.7"
 async-recursion = "1.0"
 # once_cell = "1.16"

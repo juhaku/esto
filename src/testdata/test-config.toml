@@ -1,6 +1,12 @@
 dbfile = "sqlite::memory:"
+block_time_sec = 1800 # 30 min
 
 [[commands]]
 command = 'tail -f /var/log/auth.log'
-# command = 'tail -f foo'
 contains = ['Failed password for root']
+matcher = "AuthLog"
+
+[[commands]]
+command = 'tail -f /var/log/kern.log --lines 1'
+contains = ['HTTPS:']
+matcher = "KernelLog"

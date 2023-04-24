@@ -59,6 +59,7 @@ where
     pub async fn unblock_expired_stored_blocked_ips(
         &self,
         block_time: Duration,
+        channel: &str,
     ) -> Result<(), EstoError> {
         log::info!("unblocking stored blocked ips");
         let BlockedIpService(repository, ..) = self;
@@ -77,7 +78,7 @@ where
 
         while let Some((ip, _)) = expired_stored_ips.next().await {
             log::debug!("unblocking ip: {ip}");
-            C::unblock(&ip).await?;
+            C::unblock(&ip, channel).await?;
             repository.delete_blocked_ip(&ip).await?;
         }
         Ok(())
@@ -92,7 +93,7 @@ mod tests {
 
     use async_trait::async_trait;
 
-    use crate::{blocker, db};
+    use crate::db;
 
     use super::*;
 
@@ -148,11 +149,14 @@ mod tests {
 
         #[async_trait]
         impl CommandService for NopCommandService {
-            async fn block<V: AsRef<str> + Display + Send + Sync>(_: V) -> Result<(), EstoError> {
+            async fn block<V: AsRef<str> + Display + Send + Sync>(
+                _: V,
+                _: &str,
+            ) -> Result<(), EstoError> {
                 Ok(())
             }
 
-            async fn unblock<V: AsRef<str> + Send>(_: V) -> Result<(), EstoError> {
+            async fn unblock<V: AsRef<str> + Send>(_: V, _: &str) -> Result<(), EstoError> {
                 Ok(())
             }
         }
@@ -183,10 +187,13 @@ mod tests {
         );
 
         service
-            .unblock_expired_stored_blocked_ips(time::Duration::new(
-                blocker::BLOCK_TIME.as_secs() as i64,
-                0,
-            ))
+            .unblock_expired_stored_blocked_ips(
+                time::Duration::new(
+                    1800, // 30 min
+                    0,
+                ),
+                "INPUT",
+            )
             .await
             .expect("failed to unblock expired stored blocked ips");
 

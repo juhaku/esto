@@ -17,9 +17,15 @@ use crate::blocked_ip::BlockedIpsRepository;
 
 #[async_trait]
 pub trait CommandService {
-    async fn block<V: AsRef<str> + Display + Send + Sync>(value: V) -> Result<(), EstoError>;
+    async fn block<V: AsRef<str> + Display + Send + Sync>(
+        value: V,
+        channel: &str,
+    ) -> Result<(), EstoError>;
 
-    async fn unblock<V: AsRef<str> + Display + Send + Sync>(value: V) -> Result<(), EstoError>;
+    async fn unblock<V: AsRef<str> + Display + Send + Sync>(
+        value: V,
+        channel: &str,
+    ) -> Result<(), EstoError>;
 }
 
 #[derive(Default)]
@@ -28,10 +34,10 @@ pub struct DefaultCommandService;
 #[async_trait]
 impl CommandService for DefaultCommandService {
     // sudo iptables -D INPUT -s 61.177.173.16 -j DROP
-    async fn unblock<V: AsRef<str> + Send>(value: V) -> Result<(), EstoError> {
+    async fn unblock<V: AsRef<str> + Send>(value: V, channel: &str) -> Result<(), EstoError> {
         let value = value.as_ref();
         Command::new("sudo")
-            .args(["iptables", "-D", "INPUT", "-s", value, "-j", "DROP"])
+            .args(["iptables", "-D", channel, "-s", value, "-j", "DROP"])
             .status()
             .await
             .map(|status| log::debug!("Unblock command exited with status: {status}"))
@@ -39,10 +45,10 @@ impl CommandService for DefaultCommandService {
     }
 
     // sudo iptables -I INPUT -s 61.177.173.16 -j DROP
-    async fn block<V: AsRef<str> + Send>(value: V) -> Result<(), EstoError> {
+    async fn block<V: AsRef<str> + Send>(value: V, channel: &str) -> Result<(), EstoError> {
         let value = value.as_ref();
         Command::new("sudo")
-            .args(["iptables", "-I", "INPUT", "-s", value, "-j", "DROP"])
+            .args(["iptables", "-I", channel, "-s", value, "-j", "DROP"])
             .status()
             .await
             .map(|status| {
@@ -59,20 +65,34 @@ pub struct Storage {
 }
 
 #[derive(Default)]
+pub struct BlockerConfig {
+    pub threshold_seconds: u64,
+    pub threshold_ips: i16,
+    pub channel: &'static str,
+    pub block_time: u64,
+}
+
+#[derive(Default)]
 pub struct Blocker<C> {
     _p: PhantomData<C>,
     blocked_ip_repository: Option<BlockedIpsRepository>,
     storage: Arc<Mutex<Storage>>,
+    config: BlockerConfig,
 }
 
 impl<C> Blocker<C>
 where
     C: CommandService + Default,
 {
-    pub fn new(storage: Arc<Mutex<Storage>>, blocked_ip_repository: BlockedIpsRepository) -> Self {
+    pub fn new(
+        storage: Arc<Mutex<Storage>>,
+        blocked_ip_repository: BlockedIpsRepository,
+        config: BlockerConfig,
+    ) -> Self {
         Self {
             storage,
             blocked_ip_repository: Some(blocked_ip_repository),
+            config,
             ..Default::default()
         }
     }
@@ -102,6 +122,8 @@ where
         let _ = self.load_ips_from_blocked_ips().await;
         const TIMEOUT_SECONDS: u64 = 60;
         let is_blocked_checkup = time::sleep(Duration::from_secs(TIMEOUT_SECONDS));
+        let threshold_should_block = Duration::from_secs(self.config.threshold_seconds);
+        let block_time = Duration::from_secs(self.config.block_time);
         tokio::pin!(is_blocked_checkup);
         tokio::pin!(close);
 
@@ -109,10 +131,10 @@ where
             tokio::select! {
                 Some(addr) = ip_receiver.recv() => {
                     log::debug!("received ip: {addr}");
-                    if self.should_block_ip(addr.clone()).await && !self.is_blocked(&addr).await {
+                    if self.should_block_ip(addr.clone(), threshold_should_block).await && !self.is_blocked(&addr).await {
                         log::info!("Blocking ip: {addr}");
                         let ip = Ip { ip: addr, blocked: Instant::now() };
-                        ip.block::<C>().await?;
+                        ip.block::<C>(self.config.channel).await?;
                         if let Some(repository) = self.blocked_ip_repository.as_ref() {
                             repository.add_blocked_ip(&ip.ip, OffsetDateTime::now_utc().unix_timestamp()).await?;
                         };
@@ -134,12 +156,12 @@ where
                                                          .ips
                                                          .clone()
                                                          .into_iter()
-                                                         .partition(|ip| ip.can_unblock());
+                                                         .partition(|ip| ip.can_unblock(block_time));
                         let mut unblock_ips = tokio_stream::iter(&mut unblockable);
                         while let Some(ip) = unblock_ips.next().await {
                             log::info!("Unblocking ip: {ip}", ip = ip.ip);
                             storage.candidates.remove(&ip.ip);
-                            ip.unblock::<C>().await?;
+                            ip.unblock::<C>(self.config.channel).await?;
 
                             if let Some(repository) = self.blocked_ip_repository.as_ref() {
                                 repository.delete_blocked_ip(&ip.ip).await?;
@@ -147,7 +169,7 @@ where
                         }
                         storage.ips = blocked;
                     }
-                    self.clear_stale_candidate_ips().await;
+                    self.clear_stale_candidate_ips(threshold_should_block).await;
                     log::debug!("Restarting unblock ip checker timer");
                     // restart the timer
                     is_blocked_checkup.set(time::sleep(Duration::from_secs(TIMEOUT_SECONDS)));
@@ -161,7 +183,7 @@ where
         Ok(())
     }
 
-    async fn should_block_ip(&mut self, ip: String) -> bool {
+    async fn should_block_ip(&mut self, ip: String, block_time: Duration) -> bool {
         log::info!("Checking whether should block ip: {ip}");
         let mut storage = self.storage.lock().await;
 
@@ -174,7 +196,7 @@ where
             let first = last_5_instants.rev().take(1).next();
 
             let within_block_time = if let Some((first, last)) = first.zip(last) {
-                last.duration_since(*first) < BLOCK_TIME
+                last.duration_since(*first) < block_time
             } else {
                 false
             };
@@ -191,14 +213,14 @@ where
         }
     }
 
-    async fn clear_stale_candidate_ips(&mut self) {
+    async fn clear_stale_candidate_ips(&mut self, block_time: Duration) {
         let mut storage = self.storage.lock().await;
         let candidates = storage.candidates.len();
         log::info!("Clearing stale ips: {candidates}");
         storage.candidates.retain(|_, instants| {
             instants
                 .last()
-                .map(|instant| instant.elapsed() < BLOCK_TIME)
+                .map(|instant| instant.elapsed() < block_time)
                 .unwrap_or(true)
         });
         log::debug!(
@@ -215,7 +237,7 @@ where
     }
 }
 
-pub const BLOCK_TIME: Duration = Duration::from_secs(60 * 30);
+// pub const BLOCK_TIME: Duration = Duration::from_secs(60 * 30);
 
 #[derive(Clone, Debug, PartialEq, Eq)]
 struct Ip {
@@ -224,22 +246,22 @@ struct Ip {
 }
 
 impl Ip {
-    fn can_unblock(&self) -> bool {
+    fn can_unblock(&self, block_time: Duration) -> bool {
         log::trace!(
             "Can ip: '{}' be unblocked, {:?} > {:?}",
             &self.ip,
             &self.blocked.elapsed(),
-            BLOCK_TIME
+            block_time
         );
-        self.blocked.elapsed() > BLOCK_TIME
+        self.blocked.elapsed() > block_time
     }
 
-    async fn unblock<C: CommandService>(&self) -> Result<(), EstoError> {
-        C::unblock(&self.ip).await
+    async fn unblock<C: CommandService>(&self, channel: &str) -> Result<(), EstoError> {
+        C::unblock(&self.ip, channel).await
     }
 
-    async fn block<C: CommandService>(&self) -> Result<(), EstoError> {
-        C::block(&self.ip).await
+    async fn block<C: CommandService>(&self, channel: &str) -> Result<(), EstoError> {
+        C::block(&self.ip, channel).await
     }
 }
 
@@ -272,20 +294,29 @@ mod tests {
         impl CommandService for NopCommandService {
             async fn block<V: AsRef<str> + Display + Send + Sync>(
                 value: V,
+                _: &str,
             ) -> Result<(), EstoError> {
                 assert_eq!("61.177.173.16", value.as_ref(), "called with unexpected ip");
                 IP.get_or_init(|| async { value.to_string() }).await;
                 Ok(())
             }
 
-            async fn unblock<V: AsRef<str> + Send>(value: V) -> Result<(), EstoError> {
+            async fn unblock<V: AsRef<str> + Send>(value: V, _: &str) -> Result<(), EstoError> {
                 IP_UNBLOCKED.get_or_init(|| async { true }).await;
                 assert_eq!("61.177.173.16", value.as_ref(), "called with unexpected ip");
                 Ok(())
             }
         }
 
-        let mut blocker = Blocker::<NopCommandService>::default();
+        let mut blocker: Blocker<NopCommandService> = Blocker {
+            config: BlockerConfig {
+                threshold_seconds: 1800,
+                threshold_ips: 4,
+                channel: "INPUT",
+                block_time: 1800,
+            },
+            ..Default::default()
+        };
         tokio::spawn(async move { blocker.run(rx, brx).await });
 
         tx.send("61.177.173.16".to_string()).await.unwrap();
@@ -323,11 +354,14 @@ mod tests {
 
         #[async_trait]
         impl CommandService for NopCommandService {
-            async fn block<V: AsRef<str> + Display + Send + Sync>(_: V) -> Result<(), EstoError> {
+            async fn block<V: AsRef<str> + Display + Send + Sync>(
+                _: V,
+                _: &str,
+            ) -> Result<(), EstoError> {
                 Ok(())
             }
 
-            async fn unblock<V: AsRef<str> + Send>(_: V) -> Result<(), EstoError> {
+            async fn unblock<V: AsRef<str> + Send>(_: V, _: &str) -> Result<(), EstoError> {
                 Ok(())
             }
         }
@@ -335,8 +369,16 @@ mod tests {
         let storage = Arc::new(Mutex::new(Storage::default()));
         let local_storage = storage.clone();
 
-        let mut blocker =
-            Blocker::<NopCommandService>::new(storage, BlockedIpsRepository(Arc::new(pool)));
+        let mut blocker = Blocker::<NopCommandService>::new(
+            storage,
+            BlockedIpsRepository(Arc::new(pool)),
+            BlockerConfig {
+                threshold_seconds: 1800,
+                channel: "INPUT",
+                threshold_ips: 4,
+                block_time: 1800,
+            },
+        );
         tokio::spawn(async move { blocker.run(rx, brx).await });
 
         tx.send("61.177.173.16".to_string()).await.unwrap();
@@ -378,11 +420,14 @@ mod tests {
 
         #[async_trait]
         impl CommandService for NopCommandService {
-            async fn block<V: AsRef<str> + Display + Send + Sync>(_: V) -> Result<(), EstoError> {
+            async fn block<V: AsRef<str> + Display + Send + Sync>(
+                _: V,
+                _: &str,
+            ) -> Result<(), EstoError> {
                 Ok(())
             }
 
-            async fn unblock<V: AsRef<str> + Send>(_: V) -> Result<(), EstoError> {
+            async fn unblock<V: AsRef<str> + Send>(_: V, _: &str) -> Result<(), EstoError> {
                 Ok(())
             }
         }
@@ -394,7 +439,16 @@ mod tests {
         let storage = Arc::new(Mutex::new(Storage::default()));
         let local_storage = storage.clone();
 
-        let mut blocker = Blocker::<NopCommandService>::new(storage, repository.clone());
+        let mut blocker = Blocker::<NopCommandService>::new(
+            storage,
+            repository.clone(),
+            BlockerConfig {
+                threshold_seconds: 1800,
+                channel: "INPUT",
+                threshold_ips: 4,
+                block_time: 1800,
+            },
+        );
         let handle = tokio::spawn(async move { blocker.run(rx, brx).await });
         let (_, _) = tokio::join!(handle, async move {
             let _ = btx.send(());

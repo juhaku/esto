@@ -7,11 +7,12 @@ use futures::{future, Future};
 use serde::{Deserialize, Serialize};
 use tokio::signal::unix::{self, SignalKind};
 use tokio::sync::{broadcast, mpsc, oneshot, Mutex};
+use tokio::task::JoinHandle;
 use tokio::{fs, signal, task};
 
 use crate::analyzer::Analyser;
 use crate::blocked_ip::{BlockedIpService, BlockedIpsRepository};
-use crate::blocker::{self, Blocker, DefaultCommandService, Storage};
+use crate::blocker::{Blocker, BlockerConfig, DefaultCommandService, Storage};
 use crate::db;
 
 const ESTO_CONFIG_PATH_KEY: &str = "ESTO_CONFIG_PATH";
@@ -19,6 +20,7 @@ const ESTO_CONFIG_PATH_KEY: &str = "ESTO_CONFIG_PATH";
 #[derive(Serialize, Deserialize, Debug)]
 pub struct Config {
     pub dbfile: String,
+    pub block_time_sec: u64,
     pub commands: Vec<Command>,
 }
 
@@ -26,6 +28,13 @@ pub struct Config {
 pub struct Command {
     pub command: String,
     pub contains: Vec<String>,
+    pub matcher: Matcher,
+}
+
+#[derive(Debug, Serialize, Deserialize, PartialEq, Eq)]
+pub enum Matcher {
+    AuthLog,
+    KernelLog,
 }
 
 #[derive(thiserror::Error, Debug)]
@@ -85,37 +94,64 @@ pub async fn run() -> Result<(), EstoError> {
     let service =
         BlockedIpService::<DefaultCommandService>::new(BlockedIpsRepository(pool.clone()));
     service
-        .unblock_expired_stored_blocked_ips(time::Duration::new(
-            blocker::BLOCK_TIME.as_secs() as i64,
-            0,
-        ))
+        .unblock_expired_stored_blocked_ips(
+            time::Duration::new(config.block_time_sec as i64, 0),
+            "INPUT",
+        )
         .await?;
-
-    // let commands = config.commands.len();
-    let (tx, rx) = mpsc::channel::<String>(1024);
+    service
+        .unblock_expired_stored_blocked_ips(
+            time::Duration::new(config.block_time_sec as i64, 0),
+            "DOCKER",
+        )
+        .await?;
 
     let (btx, _) = broadcast::channel(1);
     // start backgroud task which listens termiante signals
     let btx2 = btx.clone();
     tokio::spawn(async { register_graceful_shutdown(btx2).await });
 
-    let shutdown_receiver = btx.subscribe();
-    let blocker = tokio::spawn(async {
-        let mut blocker = Blocker::<DefaultCommandService>::new(
-            Arc::new(Mutex::new(Storage::default())),
-            BlockedIpsRepository(pool),
-        );
-        // let mut blocker = Blocker::<DefaultCommandService>::default();
-        blocker.run(rx, shutdown_receiver).await
-    });
+    let storage = Arc::new(Mutex::new(Storage::default()));
+    let repository = BlockedIpsRepository(pool);
+    let threshold_seconds = config.block_time_sec;
+
+    let (default_blocker_sender, default_blocker) = create_blocker(
+        storage.clone(),
+        repository.clone(),
+        BlockerConfig {
+            threshold_seconds,
+            threshold_ips: 4,
+            channel: "INPUT",
+            block_time: threshold_seconds,
+        },
+        btx.subscribe(),
+    )
+    .await;
+
+    let (kernel_blocker_sender, kernel_blocker) = create_blocker(
+        storage,
+        repository,
+        BlockerConfig {
+            threshold_seconds: 10,
+            threshold_ips: 10,
+            channel: "DOCKER",
+            block_time: threshold_seconds,
+        },
+        btx.subscribe(),
+    )
+    .await;
 
     let command_handlers = future::join_all(
         config
             .commands
             .into_iter()
-            .map(Analyser::from)
-            .map(|analyzer| {
-                let blocker = tx.clone();
+            .map(|command| {
+                let blocker = if command.matcher == Matcher::AuthLog {
+                    default_blocker_sender.clone()
+                } else {
+                    kernel_blocker_sender.clone()
+                };
+                let analyzer: Analyser = command.into();
                 let btx = btx.clone();
                 tokio::spawn(async move {
                     #[async_recursion]
@@ -146,7 +182,7 @@ pub async fn run() -> Result<(), EstoError> {
             .collect::<Vec<_>>(),
     );
 
-    let (_, _) = tokio::join!(blocker, command_handlers);
+    let (_, _, _) = tokio::join!(default_blocker, kernel_blocker, command_handlers);
 
     Ok(())
 }
@@ -194,4 +230,32 @@ async fn register_graceful_shutdown(shutdown: broadcast::Sender<()>) -> Result<(
     };
 
     Ok(())
+}
+
+async fn create_blocker(
+    storage: Arc<Mutex<Storage>>,
+    repository: BlockedIpsRepository,
+    config: BlockerConfig,
+    shutdown_receiver: broadcast::Receiver<()>,
+) -> (mpsc::Sender<String>, JoinHandle<Result<(), EstoError>>) {
+    let (tx, rx) = mpsc::channel::<String>(1024);
+
+    let default_blocker = tokio::spawn(async move {
+        let mut blocker = Blocker::<DefaultCommandService>::new(storage, repository, config);
+        // let mut blocker = Blocker::<DefaultCommandService>::default();
+        blocker.run(rx, shutdown_receiver).await
+    });
+
+    (tx, default_blocker)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn test_parse_config() {
+        let _: Config =
+            toml::from_str(include_str!("testdata/test-config.toml")).expect("Invalid toml format");
+    }
 }
