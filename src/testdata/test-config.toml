@@ -1,6 +1,13 @@
 dbfile = "sqlite::memory:"
 block_time_sec = 1800 # 30 min
 
+[input]
+threshold_ips = 4
+
+[docker]
+threshold_seconds = 10
+threshold_ips = 4
+
 [[commands]]
 command = 'tail -f /var/log/auth.log'
 contains = ['Failed password for root']

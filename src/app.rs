@@ -22,6 +22,8 @@ pub struct Config {
     pub dbfile: String,
     pub block_time_sec: u64,
     pub commands: Vec<Command>,
+    pub input: BlockerThresholds,
+    pub docker: BlockerThresholds,
 }
 
 #[derive(Serialize, Deserialize, Debug)]
@@ -35,6 +37,14 @@ pub struct Command {
 pub enum Matcher {
     AuthLog,
     KernelLog,
+}
+
+#[derive(Serialize, Deserialize, Debug)]
+pub struct BlockerThresholds {
+    #[serde(default)]
+    pub threshold_seconds: u64,
+    #[serde(default)]
+    pub threshold_ips: i16,
 }
 
 #[derive(thiserror::Error, Debug)]
@@ -86,7 +96,7 @@ pub async fn run() -> Result<(), EstoError> {
             log::set_max_level(log::LevelFilter::Debug);
         })
         .unwrap_or_else(|_| env_logger::init());
-    log::info!("Starting up esto");
+    log::info!("Starting up esto: {version}", version = env!("CARGO_PKG_VERSION"));
     let config = load_config().await?;
     log::debug!("config: {config:#?}");
     let pool = db::init(config.dbfile).await?;
@@ -119,8 +129,12 @@ pub async fn run() -> Result<(), EstoError> {
         storage.clone(),
         repository.clone(),
         BlockerConfig {
-            threshold_seconds,
-            threshold_ips: 4,
+            threshold_seconds: if config.input.threshold_seconds == 0 {
+                threshold_seconds
+            } else {
+                config.input.threshold_seconds
+            },
+            threshold_ips: config.input.threshold_ips,
             channel: "INPUT",
             block_time: threshold_seconds,
         },
@@ -132,8 +146,12 @@ pub async fn run() -> Result<(), EstoError> {
         storage,
         repository,
         BlockerConfig {
-            threshold_seconds: 10,
-            threshold_ips: 10,
+            threshold_seconds: if config.docker.threshold_seconds == 0 {
+                threshold_seconds
+            } else {
+                config.docker.threshold_seconds
+            },
+            threshold_ips: config.docker.threshold_ips,
             channel: "DOCKER",
             block_time: threshold_seconds,
         },
