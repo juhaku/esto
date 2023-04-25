@@ -205,7 +205,7 @@ where
                 "instants: {instants}, within_block_time: {within_block_time}",
                 instants = instants.len()
             );
-            instants.len() > 4 && within_block_time
+            instants.len() > self.config.threshold_ips as usize && within_block_time
         } else {
             log::debug!("ip: '{ip}' is new one, putting it to candidate list");
             storage.candidates.insert(ip.clone(), vec![Instant::now()]);
