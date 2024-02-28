@@ -172,6 +172,7 @@ pub async fn run() -> Result<(), EstoError> {
                 } else {
                     kernel_blocker_sender.clone()
                 };
+
                 let analyzer: Analyser = command.into();
                 let btx = btx.clone();
                 tokio::spawn(async move {
@@ -192,6 +193,7 @@ pub async fn run() -> Result<(), EstoError> {
                                 log::info!("Analyzer command stopped abruptly, retyring");
                                 run(analyzer, blocker, shutdown_sender, max_attempts).await
                             }
+                            Err(EstoError::TokioJoin(_)) => get_result(result),
                             Err(error) if max_attempts > 0 => {
                                 max_attempts -= 1;
                                 log::info!("Analyzer encoutered error: {error}, retrying, attempts left: {max_attempts}");
@@ -284,3 +286,4 @@ mod tests {
             toml::from_str(include_str!("testdata/test-config.toml")).expect("Invalid toml format");
     }
 }
+
