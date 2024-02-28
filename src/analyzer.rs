@@ -56,9 +56,8 @@ impl Analyser {
                                 );
                                 if status.success() {
                                     break Ok(())
-                                } else {
-                                    break Err(EstoError::AnalyzeCommand(status.code()));
                                 }
+                                break Err(EstoError::AnalyzeCommand(status.code()));
                             }
                             Err(error) => break Err(EstoError::AnalyzerHandleAwait(error))
                         }
@@ -138,7 +137,7 @@ static AUTH_IP: OnceCell<Regex> = OnceCell::const_new();
 struct AuthIpMatcher;
 
 impl AuthIpMatcher {
-    const IP_REGEX_FORMAT: &str = r"[0-9]{1,3}\.[0-9]{1,3}\.[0-9]{1,3}\.[0-9]{1,3}";
+    const IP_REGEX_FORMAT: &'static str  = r"[0-9]{1,3}\.[0-9]{1,3}\.[0-9]{1,3}\.[0-9]{1,3}";
 }
 
 #[async_trait]
@@ -168,7 +167,7 @@ static KERNEL_IP: OnceCell<Regex> = OnceCell::const_new();
 struct KernelLogIpMatcher;
 
 impl KernelLogIpMatcher {
-    const IP_REGEX_FORMAT: &str = r"SRC=[0-9]{1,3}\.[0-9]{1,3}\.[0-9]{1,3}\.[0-9]{1,3}";
+    const IP_REGEX_FORMAT: &'static str = r"SRC=[0-9]{1,3}\.[0-9]{1,3}\.[0-9]{1,3}\.[0-9]{1,3}";
 }
 
 #[async_trait]

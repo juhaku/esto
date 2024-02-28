@@ -96,7 +96,10 @@ pub async fn run() -> Result<(), EstoError> {
             log::set_max_level(log::LevelFilter::Debug);
         })
         .unwrap_or_else(|_| env_logger::init());
-    log::info!("Starting up esto: {version}", version = env!("CARGO_PKG_VERSION"));
+    log::info!(
+        "Starting up esto: {version}",
+        version = env!("CARGO_PKG_VERSION")
+    );
     let config = load_config().await?;
     log::debug!("config: {config:#?}");
     let pool = db::init(config.dbfile).await?;
@@ -177,18 +180,22 @@ pub async fn run() -> Result<(), EstoError> {
                         analyzer: Analyser,
                         blocker: mpsc::Sender<String>,
                         shutdown_sender: broadcast::Sender<()>,
-                        mut max_attemts: i8,
+                        mut max_attempts: i8,
                     ) -> Box<impl Future<Output = Result<(), EstoError>>> {
                         let result = analyzer
                             .run(blocker.clone(), shutdown_sender.subscribe())
                             .await;
-                        max_attemts -= 1;
 
                         let get_result = |result| Box::new(async { result });
-                        log::debug!("max attempts: {max_attemts}");
                         match result {
-                            Err(_) if max_attemts > 0 => {
-                                run(analyzer, blocker, shutdown_sender, max_attemts).await
+                            Err(EstoError::AnalyzeCommand(_)) => {
+                                log::info!("Analyzer command stopped abruptly, retyring");
+                                run(analyzer, blocker, shutdown_sender, max_attempts).await
+                            }
+                            Err(error) if max_attempts > 0 => {
+                                max_attempts -= 1;
+                                log::info!("Analyzer encoutered error: {error}, retrying, attempts left: {max_attempts}");
+                                run(analyzer, blocker, shutdown_sender, max_attempts).await
                             }
                             _ => get_result(result),
                         }
